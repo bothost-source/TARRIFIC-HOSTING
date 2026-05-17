@@ -1,7 +1,7 @@
 {
   "name": "tarrific-hosting-bot",
-  "version": "1.0.0",
-  "description": "Telegram Bot Hosting Bot with Referral System - Render Ready",
+  "version": "2.0.0",
+  "description": "Telegram Bot Hosting Bot with Referral System - Railway Ready",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -10,7 +10,8 @@
   "dependencies": {
     "telegraf": "^4.16.3",
     "node-telegram-bot-api": "^0.66.0",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "pm2": "^5.4.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
