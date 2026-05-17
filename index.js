@@ -1,7 +1,7 @@
 /*
- * TARRIFIC HOSTING BOT - RENDER READY VERSION
- * Deploy user bots (JS, Python, etc.) with referral system
- * Modified for Render.com deployment
+ * TARRIFIC HOSTING BOT - RAILWAY READY VERSION
+ * Deploy user bots with smart resource limits
+ * Supports 20+ bots with auto-management
  */
 
 const { Telegraf, Markup } = require('telegraf');
@@ -11,15 +11,18 @@ const path = require('path');
 const config = require('./config');
 const express = require('express');
 
-// ========== EXPRESS WEB SERVER (Required for Render) ==========
+// ========== EXPRESS WEB SERVER (Required for Railway health checks) ==========
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
+  const db = getBots();
+  const runningBots = Object.values(db.bots).filter(b => b.status === 'running').length;
   res.json({
     status: 'online',
     bot: config.botName,
     uptime: process.uptime(),
+    hostedBots: runningBots,
     timestamp: new Date().toISOString()
   });
 });
@@ -32,12 +35,21 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`[WEB SERVER] Running on port ${PORT}`);
 });
 
+// ========== RESOURCE LIMITS (Railway Free Tier Optimized) ==========
+const RESOURCE_LIMITS = {
+  maxUserBots: 25,           // Hard limit for free tier
+  ramPerBot: 256,            // MB per user bot
+  cpuPerBot: 50,             // % CPU limit per bot
+  idleTimeout: 2 * 60 * 60 * 1000,  // 2 hours idle = auto-stop
+  crashLimit: 3,             // Auto-delete after 3 crashes
+  checkInterval: 5 * 60 * 1000      // Check every 5 minutes
+};
+
 // ========== DIRECTORIES ==========
 const DB_DIR = path.join(__dirname, 'database');
 const BOTS_DIR = path.join(__dirname, 'hosted_bots');
 const LOGS_DIR = path.join(__dirname, 'logs');
 
-// Ensure directories exist (Render has ephemeral filesystem)
 [DB_DIR, BOTS_DIR, LOGS_DIR].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
@@ -192,6 +204,10 @@ function getSystemStats() {
     diskPercent = Math.round((diskUsed / diskTotal) * 100);
   } catch (e) {}
 
+  const db = getBots();
+  const totalBots = Object.keys(db.bots).length;
+  const runningBots = Object.values(db.bots).filter(b => b.status === 'running').length;
+
   return {
     cpuPercent,
     cpuCount,
@@ -203,7 +219,10 @@ function getSystemStats() {
     diskPercent,
     uptime: formatUptime(os.uptime()),
     platform: os.platform(),
-    hostname: os.hostname()
+    hostname: os.hostname(),
+    totalBots,
+    runningBots,
+    maxBots: RESOURCE_LIMITS.maxUserBots
   };
 }
 
@@ -305,7 +324,57 @@ function progressBar(percent, length = 10) {
   return '█'.repeat(filled) + '░'.repeat(Math.max(0, length - filled));
 }
 
-// ========== BOT STATUS CHECKER ==========
+// ========== SMART RESOURCE MANAGER ==========
+function enforceResourceLimits() {
+  const db = getBots();
+  const now = Date.now();
+  let stopped = 0;
+  let deleted = 0;
+
+  Object.values(db.bots).forEach(bot => {
+    // Auto-stop idle bots
+    if (bot.status === 'running' && bot.lastPing) {
+      const idleTime = now - bot.lastPing;
+      if (idleTime > RESOURCE_LIMITS.idleTimeout) {
+        console.log(`[RESOURCE MGR] Stopping idle bot ${bot.id} (${formatUptime(idleTime/1000)} idle)`);
+        stopBot(bot.id);
+        stopped++;
+      }
+    }
+
+    // Auto-delete crashed bots after limit
+    if (bot.status === 'crashed') {
+      const crashCount = bot.crashCount || 0;
+      if (crashCount >= RESOURCE_LIMITS.crashLimit) {
+        console.log(`[RESOURCE MGR] Deleting crashed bot ${bot.id} (${crashCount} crashes)`);
+        deleteBot(bot.id);
+        deleted++;
+      }
+    }
+  });
+
+  // Enforce global bot limit
+  const runningBots = Object.values(db.bots).filter(b => b.status === 'running');
+  if (runningBots.length > RESOURCE_LIMITS.maxUserBots) {
+    // Stop oldest idle bots first
+    const sorted = runningBots.sort((a, b) => (a.lastPing || 0) - (b.lastPing || 0));
+    const toStop = sorted.slice(0, runningBots.length - RESOURCE_LIMITS.maxUserBots);
+    toStop.forEach(bot => {
+      console.log(`[RESOURCE MGR] Stopping bot ${bot.id} (limit exceeded)`);
+      stopBot(bot.id);
+      stopped++;
+    });
+  }
+
+  if (stopped > 0 || deleted > 0) {
+    console.log(`[RESOURCE MGR] Stopped: ${stopped}, Deleted: ${deleted}`);
+  }
+}
+
+// Run resource manager every 5 minutes
+setInterval(enforceResourceLimits, RESOURCE_LIMITS.checkInterval);
+
+// Also run bot status checker
 setInterval(() => {
   const db = getBots();
   Object.values(db.bots).forEach(bot => {
@@ -313,9 +382,11 @@ setInterval(() => {
       try {
         process.kill(bot.pid, 0);
         bot.lastPing = Date.now();
+        saveBots(db);
       } catch (e) {
         bot.status = 'crashed';
         bot.crashedAt = Date.now();
+        bot.crashCount = (bot.crashCount || 0) + 1;
         saveBots(db);
       }
     }
@@ -350,6 +421,13 @@ function detectRuntime(filename) {
 }
 
 async function deployBot(userId, filename, fileContent, envVars = {}) {
+  // Check global limit
+  const db = getBots();
+  const runningCount = Object.values(db.bots).filter(b => b.status === 'running').length;
+  if (runningCount >= RESOURCE_LIMITS.maxUserBots) {
+    throw new Error(`Server at capacity (${RESOURCE_LIMITS.maxUserBots} bots max). Please try again later or upgrade to premium.`);
+  }
+
   const port = getNextPort();
   const botId = `bot_${userId}_${Date.now()}`;
   const botDir = path.join(BOTS_DIR, botId);
@@ -366,38 +444,58 @@ async function deployBot(userId, filename, fileContent, envVars = {}) {
   const runtime = detectRuntime(filename);
   const logFile = path.join(LOGS_DIR, `${botId}.log`);
 
-  // NOTE: PM2 removed - Render manages processes. Using direct spawn.
-  const out = fs.openSync(logFile, 'a');
-  const err = fs.openSync(logFile, 'a');
-  const newProcess = spawn(runtime.cmd, [botFile], {
-    cwd: botDir,
-    detached: true,
-    stdio: ['ignore', out, err],
-    env: { ...process.env, PORT: port, ...envVars }
+  // Use PM2 for better process management on Railway
+  const pm2Name = `host_${botId}`;
+
+  return new Promise((resolve, reject) => {
+    exec(`pm2 start ${botFile} --name ${pm2Name} --log ${logFile} --time --max-memory-restart ${RESOURCE_LIMITS.ramPerBot}M`, (err, stdout, stderr) => {
+      if (err) {
+        // Fallback to direct spawn if PM2 fails
+        const out = fs.openSync(logFile, 'a');
+        const err_fd = fs.openSync(logFile, 'a');
+        const newProcess = spawn(runtime.cmd, [botFile], {
+          cwd: botDir,
+          detached: true,
+          stdio: ['ignore', out, err_fd],
+          env: { ...process.env, PORT: port, ...envVars }
+        });
+        newProcess.unref();
+
+        db.bots[botId] = {
+          id: botId,
+          userId: userId,
+          filename: filename,
+          port: port,
+          runtime: runtime.name,
+          status: 'running',
+          pid: newProcess.pid,
+          pm2Name: null,
+          deployedAt: Date.now(),
+          lastPing: Date.now(),
+          crashCount: 0
+        };
+        saveBots(db);
+        resolve(db.bots[botId]);
+      } else {
+        // PM2 started successfully
+        db.bots[botId] = {
+          id: botId,
+          userId: userId,
+          filename: filename,
+          port: port,
+          runtime: runtime.name,
+          status: 'running',
+          pid: null, // PM2 manages PID
+          pm2Name: pm2Name,
+          deployedAt: Date.now(),
+          lastPing: Date.now(),
+          crashCount: 0
+        };
+        saveBots(db);
+        resolve(db.bots[botId]);
+      }
+    });
   });
-  newProcess.unref();
-
-  const db = getBots();
-  db.bots[botId] = {
-    id: botId,
-    userId: userId,
-    filename: filename,
-    port: port,
-    runtime: runtime.name,
-    status: 'running',
-    pid: newProcess.pid,
-    deployedAt: Date.now(),
-    lastPing: Date.now()
-  };
-  saveBots(db);
-
-  const users = getUsers();
-  if (users.users[userId]) {
-    users.users[userId].botsHosted++;
-    saveUsers(users);
-  }
-
-  return db.bots[botId];
 }
 
 function stopBot(botId) {
@@ -405,7 +503,11 @@ function stopBot(botId) {
   const bot = db.bots[botId];
   if (!bot) return false;
 
-  if (bot.pid) {
+  if (bot.pm2Name) {
+    exec(`pm2 stop ${bot.pm2Name} && pm2 delete ${bot.pm2Name}`, (err) => {
+      if (err) console.error(`[PM2 STOP ERROR] ${bot.pm2Name}:`, err.message);
+    });
+  } else if (bot.pid) {
     try { process.kill(bot.pid, 'SIGTERM'); } catch (e) {}
   }
 
@@ -512,7 +614,7 @@ bot.start(async (ctx) => {
     return sendForceJoin(ctx);
   }
 
-  const caption = `Welcome to ${config.botName}, ${firstName}!\n\nThis bot lets you deploy your own bots (JS, Python, and more).\n\nFree Plan: 1 bot\nPremium: Unlimited bots\n\nYour referral link: ${getReferralLink(userId)}\nReferrals: ${user.referralCount}/${config.requiredReferrals}\n\nUse /host to deploy a bot`;
+  const caption = `Welcome to ${config.botName}, ${firstName}!\n\nThis bot lets you deploy your own bots (JS, Python, and more).\n\nFree Plan: 1 bot\nPremium: 5 bots\nVIP: Unlimited\n\nYour referral link: ${getReferralLink(userId)}\nReferrals: ${user.referralCount}/${config.requiredReferrals}\n\nUse /host to deploy a bot`;
 
   if (fs.existsSync(config.welcomeImage)) {
     await ctx.replyWithPhoto({ source: config.welcomeImage }, {
@@ -531,15 +633,15 @@ bot.start(async (ctx) => {
 // ========== KEYBOARDS ==========
 function mainMenuKeyboard(user) {
   const buttons = [
-    [Markup.button.callback('Deploy Bot', 'deploy_menu')],
-    [Markup.button.callback('My Bots', 'my_bots')],
-    [Markup.button.callback('Referrals', 'referral_status')],
-    [Markup.button.callback('Premium', 'premium_menu')],
-    [Markup.button.callback('Help', 'help_menu')]
+    [Markup.button.callback('🚀 Deploy Bot', 'deploy_menu')],
+    [Markup.button.callback('🤖 My Bots', 'my_bots')],
+    [Markup.button.callback('👥 Referrals', 'referral_status')],
+    [Markup.button.callback('⭐ Premium', 'premium_menu')],
+    [Markup.button.callback('❓ Help', 'help_menu')]
   ];
 
   if (config.adminIds.includes(user.id)) {
-    buttons.push([Markup.button.callback('Admin Panel', 'admin_panel')]);
+    buttons.push([Markup.button.callback('🔧 Admin Panel', 'admin_panel')]);
   }
 
   return Markup.inlineKeyboard(buttons);
@@ -547,27 +649,27 @@ function mainMenuKeyboard(user) {
 
 function deployMenuKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback('Upload Bot File', 'upload_bot')],
-    [Markup.button.callback('Back', 'main_menu')]
+    [Markup.button.callback('📤 Upload Bot File', 'upload_bot')],
+    [Markup.button.callback('⬅️ Back', 'main_menu')]
   ]);
 }
 
 function premiumMenuKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback('Buy Premium (Stars)', 'buy_premium_stars')],
-    [Markup.button.callback('Buy Premium (Manual)', 'buy_premium_manual')],
-    [Markup.button.callback('Back', 'main_menu')]
+    [Markup.button.callback('⭐ Buy Premium', 'buy_premium_stars')],
+    [Markup.button.callback('💬 Contact Admin', 'buy_premium_manual')],
+    [Markup.button.callback('⬅️ Back', 'main_menu')]
   ]);
 }
 
 function adminMenuKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback('All Bots', 'admin_bots')],
-    [Markup.button.callback('All Users', 'admin_users')],
-    [Markup.button.callback('Add Premium', 'admin_add_premium')],
-    [Markup.button.callback('Stop Bot', 'admin_stop_bot')],
-    [Markup.button.callback('Broadcast', 'admin_broadcast')],
-    [Markup.button.callback('Back', 'main_menu')]
+    [Markup.button.callback('📊 All Bots', 'admin_bots')],
+    [Markup.button.callback('👥 All Users', 'admin_users')],
+    [Markup.button.callback('➕ Add Premium', 'admin_add_premium')],
+    [Markup.button.callback('⏹️ Stop Bot', 'admin_stop_bot')],
+    [Markup.button.callback('📢 Broadcast', 'admin_broadcast')],
+    [Markup.button.callback('⬅️ Back', 'main_menu')]
   ]);
 }
 
@@ -578,7 +680,7 @@ async function sendForceJoin(ctx) {
     return [{ text: `Join ${name}`, url: ch.replace('@', 'https://t.me/') }];
   });
 
-  channels.push([Markup.button.callback('I Have Joined', 'check_join')]);
+  channels.push([Markup.button.callback('✅ I Have Joined', 'check_join')]);
 
   await ctx.reply(
     `You must join our channels to use this bot.\n\nJoin all channels below, then click "I Have Joined".`,
@@ -609,9 +711,9 @@ bot.action('deploy_menu', async (ctx) => {
     return ctx.editMessageText(
       `You need ${config.requiredReferrals} referrals to host bots.\n\nYour progress: ${user.referralCount}/${config.requiredReferrals}\n\nReferral link: ${getReferralLink(userId)}`,
       Markup.inlineKeyboard([
-        [Markup.button.callback('My Referrals', 'referral_status')],
-        [Markup.button.callback('Buy Premium', 'premium_menu')],
-        [Markup.button.callback('Back', 'main_menu')]
+        [Markup.button.callback('👥 My Referrals', 'referral_status')],
+        [Markup.button.callback('⭐ Buy Premium', 'premium_menu')],
+        [Markup.button.callback('⬅️ Back', 'main_menu')]
       ])
     );
   }
@@ -623,6 +725,16 @@ bot.action('deploy_menu', async (ctx) => {
     return ctx.editMessageText(
       `You have reached your limit of ${maxBots} bot(s).\n\nUpgrade to premium for more slots.`,
       premiumMenuKeyboard()
+    );
+  }
+
+  // Check server capacity
+  const db = getBots();
+  const runningCount = Object.values(db.bots).filter(b => b.status === 'running').length;
+  if (runningCount >= RESOURCE_LIMITS.maxUserBots) {
+    return ctx.editMessageText(
+      `⚠️ Server is at capacity (${runningCount}/${RESOURCE_LIMITS.maxUserBots} bots running).\n\nPlease try again later or contact admin.`,
+      Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'main_menu')]])
     );
   }
 
@@ -639,7 +751,7 @@ bot.action('upload_bot', async (ctx) => {
 
   ctx.editMessageText(
     `Please send your bot file now.\n\nSupported formats:\n- .js (Node.js)\n- .py (Python 3)\n- .sh (Bash)\n- .rb (Ruby)\n- .php (PHP)\n- .go (Go)\n\nMax file size: 10MB`,
-    Markup.inlineKeyboard([[Markup.button.callback('Cancel', 'main_menu')]])
+    Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'main_menu')]])
   );
 });
 
@@ -669,7 +781,7 @@ bot.on('document', async (ctx) => {
 
   ctx.reply(
     `File received: ${filename}\n\nDo you need to set environment variables? (TOKEN, API_KEY, etc.)\n\nReply with variables in format:\nKEY=value\nKEY2=value2\n\nOr reply "skip" to continue without env vars.`,
-    Markup.inlineKeyboard([[Markup.button.callback('Skip', 'skip_env')]])
+    Markup.inlineKeyboard([[Markup.button.callback('⏭️ Skip', 'skip_env')]])
   );
 });
 
@@ -706,7 +818,7 @@ bot.on('text', async (ctx, next) => {
 });
 
 async function deployAndNotify(ctx, userId, filename, content, envVars) {
-  const deployingMsg = await ctx.reply('Deploying your bot... Please wait.');
+  const deployingMsg = await ctx.reply('🚀 Deploying your bot... Please wait.');
 
   try {
     const botInfo = await deployBot(userId, filename, content, envVars);
@@ -715,17 +827,18 @@ async function deployAndNotify(ctx, userId, filename, content, envVars) {
       ctx.chat.id,
       deployingMsg.message_id,
       null,
-      `Bot Deployed Successfully!\n\n` +
+      `✅ Bot Deployed Successfully!\n\n` +
       `ID: <code>${botInfo.id}</code>\n` +
       `File: ${botInfo.filename}\n` +
       `Runtime: ${botInfo.runtime}\n` +
       `Port: ${botInfo.port}\n` +
       `Status: ${botInfo.status}\n\n` +
+      `⚠️ Bots auto-stop after 2 hours of inactivity to save resources.\n\n` +
       `Use /mybots to manage your bots.`,
       { parse_mode: 'HTML', ...Markup.inlineKeyboard([
-        [Markup.button.callback('My Bots', 'my_bots')],
-        [Markup.button.callback('View Logs', `logs_${botInfo.id}`)],
-        [Markup.button.callback('Main Menu', 'main_menu')]
+        [Markup.button.callback('🤖 My Bots', 'my_bots')],
+        [Markup.button.callback('📋 View Logs', `logs_${botInfo.id}`)],
+        [Markup.button.callback('🏠 Main Menu', 'main_menu')]
       ])}
     );
   } catch (err) {
@@ -733,7 +846,7 @@ async function deployAndNotify(ctx, userId, filename, content, envVars) {
       ctx.chat.id,
       deployingMsg.message_id,
       null,
-      `Deployment Failed!\n\nError: ${err.message}`,
+      `❌ Deployment Failed!\n\nError: ${err.message}`,
       { parse_mode: 'HTML' }
     );
   }
@@ -748,16 +861,17 @@ bot.action('my_bots', async (ctx) => {
   if (bots.length === 0) {
     return ctx.editMessageText(
       'You have no deployed bots.\n\nUse /host to deploy one.',
-      Markup.inlineKeyboard([[Markup.button.callback('Deploy Bot', 'deploy_menu')], [Markup.button.callback('Back', 'main_menu')]])
+      Markup.inlineKeyboard([[Markup.button.callback('🚀 Deploy Bot', 'deploy_menu')], [Markup.button.callback('⬅️ Back', 'main_menu')]])
     );
   }
 
   const sysStats = getSystemStats();
-  let text = `📊 SERVER OVERVIEW\n`;
+  let text = `📊 SERVER STATUS\n`;
   text += `┌─────────────────────────────┐\n`;
   text += `│ CPU: ${sysStats.cpuPercent}% ${progressBar(sysStats.cpuPercent)}\n`;
   text += `│ RAM: ${sysStats.memUsed} / ${sysStats.memTotal} (${sysStats.memPercent}%)\n`;
   text += `│ Disk: ${sysStats.diskUsed} / ${sysStats.diskTotal} (${sysStats.diskPercent}%)\n`;
+  text += `│ Bots: ${sysStats.runningBots}/${sysStats.maxBots} running\n`;
   text += `│ Uptime: ${sysStats.uptime}\n`;
   text += `└─────────────────────────────┘\n\n`;
 
@@ -776,7 +890,7 @@ bot.action('my_bots', async (ctx) => {
 
     if (stats.processStats) {
       text += `   CPU: ${stats.processStats.cpu} | RAM: ${stats.processStats.memory}\n`;
-      text += `   Process Uptime: ${stats.processStats.uptime}\n`;
+      text += `   Uptime: ${stats.processStats.uptime}\n`;
     }
 
     text += `   Size: ${stats.dirSize} | Logs: ${stats.logSize}\n`;
@@ -845,7 +959,7 @@ bot.action('referral_status', async (ctx) => {
   let text = `Your Referral Status\n\n`;
   text += `Link: ${getReferralLink(userId)}\n`;
   text += `Progress: ${user.referralCount}/${config.requiredReferrals}\n`;
-  text += `Status: ${hasEnoughReferrals(userId) ? 'Unlocked' : 'Locked'}\n\n`;
+  text += `Status: ${hasEnoughReferrals(userId) ? '✅ Unlocked' : '🔒 Locked'}\n\n`;
 
   if (referredList.length > 0) {
     text += `Referred Users (${referredList.length}):\n`;
@@ -857,8 +971,8 @@ bot.action('referral_status', async (ctx) => {
   ctx.editMessageText(text, {
     parse_mode: 'HTML',
     ...Markup.inlineKeyboard([
-      [Markup.button.callback('Copy Link', 'copy_ref_link')],
-      [Markup.button.callback('Back', 'main_menu')]
+      [Markup.button.callback('📋 Copy Link', 'copy_ref_link')],
+      [Markup.button.callback('⬅️ Back', 'main_menu')]
     ])
   });
 });
@@ -872,13 +986,15 @@ bot.action('copy_ref_link', async (ctx) => {
 bot.action('premium_menu', async (ctx) => {
   await ctx.answerCbQuery();
   ctx.editMessageText(
-    `Premium Plans\n\n` +
-    `Free: 1 bot slot\n` +
-    `Premium: Unlimited bots\n\n` +
+    `⭐ Premium Plans\n\n` +
+    `🆓 Free: 1 bot slot\n` +
+    `⭐ Premium: 5 bot slots\n` +
+    `👑 VIP: Unlimited bots\n\n` +
     `Pricing:\n` +
-    `1. Telegram Stars (in-app)\n` +
-    `2. Manual payment (contact admin)\n\n` +
-    `Contact: @${config.ownerUsername}`,
+    `• 5 slots - 500 Stars\n` +
+    `• 10 slots - 900 Stars\n` +
+    `• Unlimited - 1500 Stars\n\n` +
+    `💬 Contact: @${config.ownerUsername}`,
     premiumMenuKeyboard()
   );
 });
@@ -886,16 +1002,17 @@ bot.action('premium_menu', async (ctx) => {
 bot.action('buy_premium_stars', async (ctx) => {
   await ctx.answerCbQuery();
   ctx.editMessageText(
-    `Premium via Telegram Stars\n\n` +
-    `5 slots - 500 Stars\n` +
-    `10 slots - 900 Stars\n` +
-    `Unlimited - 1500 Stars\n\n` +
+    `⭐ Premium via Telegram Stars\n\n` +
+    `Choose your plan:\n\n` +
+    `🥉 5 Slots - 500 Stars\n` +
+    `🥈 10 Slots - 900 Stars\n` +
+    `🥇 Unlimited - 1500 Stars\n\n` +
     `Click below to pay:`,
     Markup.inlineKeyboard([
-      [Markup.button.callback('5 Slots (500)', 'stars_5_500')],
-      [Markup.button.callback('10 Slots (900)', 'stars_10_900')],
-      [Markup.button.callback('Unlimited (1500)', 'stars_unli_1500')],
-      [Markup.button.callback('Back', 'premium_menu')]
+      [Markup.button.callback('🥉 5 Slots (500)', 'stars_5_500')],
+      [Markup.button.callback('🥈 10 Slots (900)', 'stars_10_900')],
+      [Markup.button.callback('🥇 Unlimited (1500)', 'stars_unli_1500')],
+      [Markup.button.callback('⬅️ Back', 'premium_menu')]
     ])
   );
 });
@@ -903,11 +1020,11 @@ bot.action('buy_premium_stars', async (ctx) => {
 bot.action('buy_premium_manual', async (ctx) => {
   await ctx.answerCbQuery();
   ctx.editMessageText(
-    `Manual Payment\n\n` +
+    `💬 Manual Payment\n\n` +
     `Contact @${config.ownerUsername} directly.\n\n` +
     `Send your User ID: <code>${ctx.from.id}</code>\n` +
     `And mention how many slots you want.`,
-    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('Back', 'premium_menu')]]) }
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'premium_menu')]]) }
   );
 });
 
@@ -923,11 +1040,11 @@ bot.command('addpremium', async (ctx) => {
   if (!targetId) return ctx.reply('Usage: /addpremium <userId> [slots] [days]');
 
   addPremium(targetId, slots, days);
-  ctx.reply(`Premium added for <code>${targetId}</code>\nSlots: ${slots}\nDays: ${days}`, { parse_mode: 'HTML' });
+  ctx.reply(`✅ Premium added for <code>${targetId}</code>\nSlots: ${slots}\nDays: ${days}`, { parse_mode: 'HTML' });
 
   try {
     await ctx.telegram.sendMessage(targetId,
-      `Premium Activated!\n\nSlots: ${slots}\nExpires: ${new Date(Date.now() + days*86400000).toLocaleDateString()}\n\nUse /host to deploy more bots.`
+      `⭐ Premium Activated!\n\nSlots: ${slots}\nExpires: ${new Date(Date.now() + days*86400000).toLocaleDateString()}\n\nUse /host to deploy more bots.`
     );
   } catch (e) {}
 });
@@ -938,7 +1055,7 @@ bot.action('admin_panel', async (ctx) => {
   const userId = ctx.from.id.toString();
   if (!config.adminIds.includes(userId)) return ctx.answerCbQuery('Admin only!', { show_alert: true });
 
-  ctx.editMessageText('Admin Panel', adminMenuKeyboard());
+  ctx.editMessageText('🔧 Admin Panel', adminMenuKeyboard());
 });
 
 bot.action('admin_bots', async (ctx) => {
@@ -946,7 +1063,7 @@ bot.action('admin_bots', async (ctx) => {
   const db = getBots();
   const bots = Object.values(db.bots);
 
-  let text = `All Hosted Bots (${bots.length})\n\n`;
+  let text = `📊 All Hosted Bots (${bots.length})\n\n`;
   bots.forEach(b => {
     text += `<code>${b.id}</code> | ${b.filename} | Port ${b.port} | ${b.status}\n`;
   });
@@ -959,7 +1076,7 @@ bot.action('admin_users', async (ctx) => {
   const db = getUsers();
   const users = Object.values(db.users);
 
-  let text = `All Users (${users.length})\n\n`;
+  let text = `👥 All Users (${users.length})\n\n`;
   users.slice(0, 50).forEach(u => {
     text += `<code>${u.id}</code> | ${u.firstName} | Refs: ${u.referralCount} | Bots: ${u.botsHosted}\n`;
   });
@@ -1010,12 +1127,12 @@ bot.command('broadcast', async (ctx) => {
 
   for (const user of Object.values(db.users)) {
     try {
-      await ctx.telegram.sendMessage(user.id, `Broadcast:\n\n${msg}`);
+      await ctx.telegram.sendMessage(user.id, `📢 Broadcast:\n\n${msg}`);
       sent++;
     } catch (e) { failed++; }
   }
 
-  ctx.reply(`Broadcast sent! Success: ${sent}, Failed: ${failed}`);
+  ctx.reply(`Broadcast sent! ✅ Success: ${sent}, ❌ Failed: ${failed}`);
 });
 
 // ========== RESTART / DELETE / STATS ==========
@@ -1107,6 +1224,7 @@ bot.action(/botstats_(.+)/, async (ctx) => {
   text += `│ Server CPU: ${sysStats.cpuPercent}%\n`;
   text += `│ Server RAM: ${sysStats.memPercent}%\n`;
   text += `│ Server Disk: ${sysStats.diskPercent}%\n`;
+  text += `│ Total Bots: ${sysStats.runningBots}/${sysStats.maxBots}\n`;
   text += `└────────────────────────────────┘\n`;
 
   if (stats.lastError) {
@@ -1138,10 +1256,7 @@ bot.command('server', async (ctx) => {
   text += `${progressBar(stats.diskPercent)} ${stats.diskPercent}%\n`;
   text += `${stats.diskUsed} / ${stats.diskTotal}\n\n`;
 
-  const db = getBots();
-  const totalBots = Object.keys(db.bots).length;
-  const runningBots = Object.values(db.bots).filter(b => b.status === 'running').length;
-  text += `Hosted Bots: ${totalBots} (${runningBots} running)`;
+  text += `🤖 Hosted Bots: ${stats.totalBots} (${stats.runningBots} running / ${stats.maxBots} max)`;
 
   ctx.reply(text, { parse_mode: 'HTML' });
 });
@@ -1150,12 +1265,13 @@ bot.command('server', async (ctx) => {
 bot.action('help_menu', async (ctx) => {
   await ctx.answerCbQuery();
   ctx.editMessageText(
-    `How to Use\n\n` +
+    `❓ How to Use\n\n` +
     `1. Get ${config.requiredReferrals} referrals or buy premium\n` +
     `2. Use /host to upload your bot file\n` +
     `3. Set environment variables if needed\n` +
     `4. Bot deploys automatically\n` +
     `5. Use /mybots to manage\n\n` +
+    `⚠️ Bots auto-stop after 2 hours idle to save resources.\n\n` +
     `Supported: Node.js, Python, Bash, Ruby, PHP, Go\n\n` +
     `Commands:\n` +
     `/start - Main menu\n` +
@@ -1163,8 +1279,9 @@ bot.action('help_menu', async (ctx) => {
     `/mybots - Your bots\n` +
     `/referral - Referral status\n` +
     `/premium - Premium plans\n` +
+    `/server - Server stats\n` +
     `/help - This menu`,
-    Markup.inlineKeyboard([[Markup.button.callback('Back', 'main_menu')]])
+    Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'main_menu')]])
   );
 });
 
@@ -1188,6 +1305,7 @@ async function launch() {
   try {
     const me = await bot.telegram.getMe();
     console.log(`[HOSTING BOT] @${me.username} started`);
+    console.log(`[RESOURCE MGR] Max bots: ${RESOURCE_LIMITS.maxUserBots}, RAM/bot: ${RESOURCE_LIMITS.ramPerBot}MB, Idle timeout: ${RESOURCE_LIMITS.idleTimeout/60000}min`);
     await bot.launch();
   } catch (err) {
     console.error('[BOOT ERROR]', err);
