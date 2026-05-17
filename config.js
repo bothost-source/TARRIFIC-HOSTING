@@ -5,7 +5,7 @@
 
 module.exports = {
   // Bot Token (get from @BotFather)
-  botToken: '8757914022:AAF_YgpadIIS2sf67_RHQJ62focxQ1FMOAo',
+  botToken: process.env.BOT_TOKEN || 'fallback_token_here',
 
   // Bot username (without @)
   botUsername: 'TARRIFICFREEHOSTINGBOT',
