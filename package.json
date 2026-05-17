@@ -1,0 +1,30 @@
+{
+  "name": "tarrific-hosting-bot",
+  "version": "1.0.0",
+  "description": "Telegram Bot Hosting Bot with Referral System - Render Ready",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "node-telegram-bot-api": "^0.66.0",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "hosting",
+    "deploy",
+    "referral"
+  ],
+  "author": "TARRIFIC",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
