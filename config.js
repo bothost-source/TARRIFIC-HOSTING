@@ -5,7 +5,7 @@
 
 module.exports = {
   // Bot Token (get from @BotFather)
-  botToken: '8757914022:AABPV-B0_v1LHQnnuoIIQ_QF3ApxBDCvc8o',
+  botToken: '8757914022:AAF_YgpadIIS2sf67_RHQJ62focxQ1FMOAo',
 
   // Bot username (without @)
   botUsername: 'TARRIFICFREEHOSTINGBOT',
