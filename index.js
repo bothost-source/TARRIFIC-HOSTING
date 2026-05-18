@@ -1,6 +1,7 @@
 /*
- * TARRIFIC HOSTING BOT - RAILWAY VERSION (FIXED)
- * Fixed: editMessageText on photo, referral logic
+ * TARRIFIC HOSTING BOT - RAILWAY VERSION (COMPLETELY FIXED)
+ * All editMessageText issues resolved
+ * Referral logic fixed
  */
 
 const { Telegraf, Markup } = require('telegraf');
@@ -567,7 +568,7 @@ const bot = new Telegraf(config.botToken);
 bot.catch((err, ctx) => {
   console.error('Bot error:', err);
   try {
-    ctx.reply('An error occurred. Please try again.').catch(() => {});
+    ctx.reply('❌ An error occurred. Please try again.').catch(() => {});
   } catch (e) {}
 });
 
@@ -763,117 +764,140 @@ function adminMenuKeyboard() {
 const pendingUploads = new Map();
 
 bot.action('deploy_menu', async (ctx) => {
-  await ctx.answerCbQuery();
-  const userId = ctx.from.id.toString();
-  const user = getUser(userId);
+  try {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id.toString();
+    const user = getUser(userId);
 
-  if (!hasEnoughReferrals(userId) && !user.isPremium) {
-    return ctx.reply(
-      `🔒 You need ${config.requiredReferrals} referrals to host bots.\n\n📊 Your progress: ${user.referralCount}/${config.requiredReferrals}\n\n🔗 Referral link: ${getReferralLink(userId)}`,
-      Markup.inlineKeyboard([
-        [Markup.button.callback('👥 My Referrals', 'referral_status')],
-        [Markup.button.callback('⭐ Buy Premium', 'premium_menu')],
-        [Markup.button.callback('⬅️ Back', 'main_menu')]
-      ])
+    if (!hasEnoughReferrals(userId) && !user.isPremium) {
+      return await safeReply(ctx, 
+        `🔒 You need ${config.requiredReferrals} referrals to host bots.\n\n📊 Your progress: ${user.referralCount}/${config.requiredReferrals}\n\n🔗 Referral link: ${getReferralLink(userId)}`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback('👥 My Referrals', 'referral_status')],
+          [Markup.button.callback('⭐ Buy Premium', 'premium_menu')],
+          [Markup.button.callback('⬅️ Back', 'main_menu')]
+        ])
+      );
+    }
+
+    const userBots = getUserBots(userId);
+    const maxBots = user.maxBots;
+
+    if (userBots.length >= maxBots) {
+      return await safeReply(ctx,
+        `⚠️ You have reached your limit of ${maxBots} bot(s).\n\nUpgrade to premium for more slots.`,
+        premiumMenuKeyboard()
+      );
+    }
+
+    const db = getBots();
+    const runningCount = Object.values(db.bots).filter(b => b.status === 'running').length;
+    if (runningCount >= RESOURCE_LIMITS.maxUserBots) {
+      return await safeReply(ctx,
+        `⚠️ Server is at capacity (${runningCount}/${RESOURCE_LIMITS.maxUserBots} bots running).\n\nPlease try again later or contact admin.`,
+        Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'main_menu')]])
+      );
+    }
+
+    await safeReply(ctx,
+      `🚀 Deploy Your Bot\n\nSupported: .js (Node.js), .py (Python), .sh (Bash), and more.\n\nClick "Upload Bot File" to send your file.`,
+      deployMenuKeyboard()
     );
+  } catch (err) {
+    console.error('deploy_menu error:', err);
+    await ctx.reply('❌ Error loading deploy menu. Please try /start').catch(() => {});
   }
-
-  const userBots = getUserBots(userId);
-  const maxBots = user.maxBots;
-
-  if (userBots.length >= maxBots) {
-    return ctx.reply(
-      `⚠️ You have reached your limit of ${maxBots} bot(s).\n\nUpgrade to premium for more slots.`,
-      premiumMenuKeyboard()
-    );
-  }
-
-  const db = getBots();
-  const runningCount = Object.values(db.bots).filter(b => b.status === 'running').length;
-  if (runningCount >= RESOURCE_LIMITS.maxUserBots) {
-    return ctx.reply(
-      `⚠️ Server is at capacity (${runningCount}/${RESOURCE_LIMITS.maxUserBots} bots running).\n\nPlease try again later or contact admin.`,
-      Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'main_menu')]])
-    );
-  }
-
-  ctx.reply(
-    `🚀 Deploy Your Bot\n\nSupported: .js (Node.js), .py (Python), .sh (Bash), and more.\n\nClick "Upload Bot File" to send your file.`,
-    deployMenuKeyboard()
-  );
 });
 
 bot.action('upload_bot', async (ctx) => {
-  await ctx.answerCbQuery();
-  const userId = ctx.from.id.toString();
-  pendingUploads.set(userId, { step: 'waiting_file' });
+  try {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id.toString();
+    pendingUploads.set(userId, { step: 'waiting_file' });
 
-  ctx.reply(
-    `📤 Please send your bot file now.\n\nSupported formats:\n- .js (Node.js)\n- .py (Python 3)\n- .sh (Bash)\n- .rb (Ruby)\n- .php (PHP)\n- .go (Go)\n\nMax file size: 10MB`,
-    Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'main_menu')]])
-  );
+    await safeReply(ctx,
+      `📤 Please send your bot file now.\n\nSupported formats:\n- .js (Node.js)\n- .py (Python 3)\n- .sh (Bash)\n- .rb (Ruby)\n- .php (PHP)\n- .go (Go)\n\nMax file size: 10MB`,
+      Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'main_menu')]])
+    );
+  } catch (err) {
+    console.error('upload_bot error:', err);
+  }
 });
 
 bot.on('document', async (ctx) => {
-  const userId = ctx.from.id.toString();
-  const pending = pendingUploads.get(userId);
-  if (!pending || pending.step !== 'waiting_file') return;
+  try {
+    const userId = ctx.from.id.toString();
+    const pending = pendingUploads.get(userId);
+    if (!pending || pending.step !== 'waiting_file') return;
 
-  const doc = ctx.message.document;
-  const filename = doc.file_name;
-  const ext = getFileExtension(filename);
+    const doc = ctx.message.document;
+    const filename = doc.file_name;
+    const ext = getFileExtension(filename);
 
-  const allowedExts = ['.js', '.py', '.sh', '.rb', '.php', '.go', '.ts'];
-  if (!allowedExts.includes(ext)) {
-    return ctx.reply(`❌ Unsupported file type: ${ext}\n\nAllowed: ${allowedExts.join(', ')}`);
+    const allowedExts = ['.js', '.py', '.sh', '.rb', '.php', '.go', '.ts'];
+    if (!allowedExts.includes(ext)) {
+      return ctx.reply(`❌ Unsupported file type: ${ext}\n\nAllowed: ${allowedExts.join(', ')}`);
+    }
+
+    const fileLink = await ctx.telegram.getFileLink(doc.file_id);
+    const response = await fetch(fileLink);
+    const content = await response.text();
+
+    pendingUploads.set(userId, {
+      step: 'waiting_env',
+      filename: filename,
+      content: content
+    });
+
+    await ctx.reply(
+      `📄 File received: ${filename}\n\nDo you need to set environment variables? (TOKEN, API_KEY, etc.)\n\nReply with variables in format:\nKEY=value\nKEY2=value2\n\nOr reply "skip" to continue without env vars.`,
+      Markup.inlineKeyboard([[Markup.button.callback('⏭️ Skip', 'skip_env')]])
+    );
+  } catch (err) {
+    console.error('document handler error:', err);
+    await ctx.reply('❌ Error processing file. Please try again.').catch(() => {});
   }
-
-  const fileLink = await ctx.telegram.getFileLink(doc.file_id);
-  const response = await fetch(fileLink);
-  const content = await response.text();
-
-  pendingUploads.set(userId, {
-    step: 'waiting_env',
-    filename: filename,
-    content: content
-  });
-
-  ctx.reply(
-    `📄 File received: ${filename}\n\nDo you need to set environment variables? (TOKEN, API_KEY, etc.)\n\nReply with variables in format:\nKEY=value\nKEY2=value2\n\nOr reply "skip" to continue without env vars.`,
-    Markup.inlineKeyboard([[Markup.button.callback('⏭️ Skip', 'skip_env')]])
-  );
 });
 
 bot.action('skip_env', async (ctx) => {
-  await ctx.answerCbQuery();
-  const userId = ctx.from.id.toString();
-  const pending = pendingUploads.get(userId);
-  if (!pending) return;
+  try {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id.toString();
+    const pending = pendingUploads.get(userId);
+    if (!pending) return;
 
-  await deployAndNotify(ctx, userId, pending.filename, pending.content, {});
-  pendingUploads.delete(userId);
+    await deployAndNotify(ctx, userId, pending.filename, pending.content, {});
+    pendingUploads.delete(userId);
+  } catch (err) {
+    console.error('skip_env error:', err);
+  }
 });
 
 bot.on('text', async (ctx, next) => {
-  const userId = ctx.from.id.toString();
-  const pending = pendingUploads.get(userId);
-  if (!pending || pending.step !== 'waiting_env') return next();
+  try {
+    const userId = ctx.from.id.toString();
+    const pending = pendingUploads.get(userId);
+    if (!pending || pending.step !== 'waiting_env') return next();
 
-  const text = ctx.message.text.trim();
-  let envVars = {};
+    const text = ctx.message.text.trim();
+    let envVars = {};
 
-  if (text.toLowerCase() !== 'skip') {
-    const lines = text.split('\n');
-    for (const line of lines) {
-      const [key, ...valueParts] = line.split('=');
-      if (key && valueParts.length > 0) {
-        envVars[key.trim()] = valueParts.join('=').trim();
+    if (text.toLowerCase() !== 'skip') {
+      const lines = text.split('\n');
+      for (const line of lines) {
+        const [key, ...valueParts] = line.split('=');
+        if (key && valueParts.length > 0) {
+          envVars[key.trim()] = valueParts.join('=').trim();
+        }
       }
     }
-  }
 
-  await deployAndNotify(ctx, userId, pending.filename, pending.content, envVars);
-  pendingUploads.delete(userId);
+    await deployAndNotify(ctx, userId, pending.filename, pending.content, envVars);
+    pendingUploads.delete(userId);
+  } catch (err) {
+    console.error('env text handler error:', err);
+    await ctx.reply('❌ Error processing env vars. Please try again.').catch(() => {});
+  }
 });
 
 async function deployAndNotify(ctx, userId, filename, content, envVars) {
@@ -911,465 +935,564 @@ async function deployAndNotify(ctx, userId, filename, content, envVars) {
   }
 }
 
+// ========== SAFE REPLY HELPER (Prevents editMessageText errors) ==========
+async function safeReply(ctx, text, keyboard) {
+  try {
+    // Try to edit if it's a callback and message exists
+    if (ctx.callbackQuery && ctx.callbackQuery.message) {
+      try {
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+        return;
+      } catch (editErr) {
+        // If edit fails (e.g., photo message), send new message
+        console.log('Edit failed, sending new message');
+      }
+    }
+    // Send as new message
+    await ctx.reply(text, { parse_mode: 'HTML', ...keyboard });
+  } catch (err) {
+    console.error('safeReply error:', err);
+    await ctx.reply(text, { parse_mode: 'HTML', ...keyboard }).catch(() => {});
+  }
+}
+
 // ========== MY BOTS ==========
 bot.action('my_bots', async (ctx) => {
-  await ctx.answerCbQuery();
-  const userId = ctx.from.id.toString();
-  const bots = getUserBots(userId);
+  try {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id.toString();
+    const bots = getUserBots(userId);
 
-  if (bots.length === 0) {
-    return ctx.reply(
-      'You have no deployed bots.\n\nUse /host to deploy one.',
-      Markup.inlineKeyboard([[Markup.button.callback('🚀 Deploy Bot', 'deploy_menu')], [Markup.button.callback('⬅️ Back', 'main_menu')]])
-    );
-  }
-
-  const sysStats = getSystemStats();
-  let text = `📊 SERVER STATUS\n`;
-  text += `┌─────────────────────────────┐\n`;
-  text += `│ CPU: ${sysStats.cpuPercent}% ${progressBar(sysStats.cpuPercent)}\n`;
-  text += `│ RAM: ${sysStats.memUsed} / ${sysStats.memTotal} (${sysStats.memPercent}%)\n`;
-  text += `│ Disk: ${sysStats.diskUsed} / ${sysStats.diskTotal} (${sysStats.diskPercent}%)\n`;
-  text += `│ Bots: ${sysStats.runningBots}/${sysStats.maxBots} running\n`;
-  text += `│ Uptime: ${sysStats.uptime}\n`;
-  text += `└─────────────────────────────┘\n\n`;
-
-  text += `🤖 YOUR BOTS (${bots.length}):\n\n`;
-
-  const buttons = [];
-
-  for (const bot of bots) {
-    const stats = getBotStats(bot.id);
-    const statusEmoji = stats.isActuallyRunning ? '🟢' : (stats.status === 'crashed' ? '🔴' : '🟡');
-
-    text += `${statusEmoji} <b>${bot.filename}</b>\n`;
-    text += `   🆔 ID: <code>${bot.id}</code>\n`;
-    text += `   🔌 Port: ${bot.port} | ⚙️ ${bot.runtime}\n`;
-    text += `   📊 Status: <b>${stats.status.toUpperCase()}</b>\n`;
-
-    if (stats.processStats) {
-      text += `   💻 CPU: ${stats.processStats.cpu} | 🧠 RAM: ${stats.processStats.memory}\n`;
-      text += `   ⏱️ Uptime: ${stats.processStats.uptime}\n`;
+    if (bots.length === 0) {
+      return await safeReply(ctx,
+        'You have no deployed bots.\n\nUse /host to deploy one.',
+        Markup.inlineKeyboard([[Markup.button.callback('🚀 Deploy Bot', 'deploy_menu')], [Markup.button.callback('⬅️ Back', 'main_menu')]])
+      );
     }
 
-    text += `   📦 Size: ${stats.dirSize} | 📝 Logs: ${stats.logSize}\n`;
+    const sysStats = getSystemStats();
+    let text = `📊 SERVER STATUS\n`;
+    text += `┌─────────────────────────────┐\n`;
+    text += `│ CPU: ${sysStats.cpuPercent}% ${progressBar(sysStats.cpuPercent)}\n`;
+    text += `│ RAM: ${sysStats.memUsed} / ${sysStats.memTotal} (${sysStats.memPercent}%)\n`;
+    text += `│ Disk: ${sysStats.diskUsed} / ${sysStats.diskTotal} (${sysStats.diskPercent}%)\n`;
+    text += `│ Bots: ${sysStats.runningBots}/${sysStats.maxBots} running\n`;
+    text += `│ Uptime: ${sysStats.uptime}\n`;
+    text += `└─────────────────────────────┘\n\n`;
 
-    if (stats.lastError) {
-      text += `   ⚠️ <b>Last Error:</b>\n   <pre>${stats.lastError.slice(0, 100)}</pre>\n`;
+    text += `🤖 YOUR BOTS (${bots.length}):\n\n`;
+
+    const buttons = [];
+
+    for (const bot of bots) {
+      const stats = getBotStats(bot.id);
+      const statusEmoji = stats.isActuallyRunning ? '🟢' : (stats.status === 'crashed' ? '🔴' : '🟡');
+
+      text += `${statusEmoji} <b>${bot.filename}</b>\n`;
+      text += `   🆔 ID: <code>${bot.id}</code>\n`;
+      text += `   🔌 Port: ${bot.port} | ⚙️ ${bot.runtime}\n`;
+      text += `   📊 Status: <b>${stats.status.toUpperCase()}</b>\n`;
+
+      if (stats.processStats) {
+        text += `   💻 CPU: ${stats.processStats.cpu} | 🧠 RAM: ${stats.processStats.memory}\n`;
+        text += `   ⏱️ Uptime: ${stats.processStats.uptime}\n`;
+      }
+
+      text += `   📦 Size: ${stats.dirSize} | 📝 Logs: ${stats.logSize}\n`;
+
+      if (stats.lastError) {
+        text += `   ⚠️ <b>Last Error:</b>\n   <pre>${stats.lastError.slice(0, 100)}</pre>\n`;
+      }
+
+      text += `\n`;
+
+      buttons.push([
+        Markup.button.callback(`${stats.isActuallyRunning ? '⏹️ Stop' : '▶️ Start'}`, `${stats.isActuallyRunning ? 'stop_' : 'restart_'}${bot.id}`),
+        Markup.button.callback('📊 Stats', `botstats_${bot.id}`),
+        Markup.button.callback('📋 Logs', `logs_${bot.id}`)
+      ]);
+      buttons.push([
+        Markup.button.callback('🗑️ Delete', `delete_${bot.id}`)
+      ]);
     }
 
-    text += `\n`;
+    buttons.push([Markup.button.callback('⬅️ Back', 'main_menu')]);
 
-    buttons.push([
-      Markup.button.callback(`${stats.isActuallyRunning ? '⏹️ Stop' : '▶️ Start'}`, `${stats.isActuallyRunning ? 'stop_' : 'restart_'}${bot.id}`),
-      Markup.button.callback('📊 Stats', `botstats_${bot.id}`),
-      Markup.button.callback('📋 Logs', `logs_${bot.id}`)
-    ]);
-    buttons.push([
-      Markup.button.callback('🗑️ Delete', `delete_${bot.id}`)
-    ]);
+    await safeReply(ctx, text, Markup.inlineKeyboard(buttons));
+  } catch (err) {
+    console.error('my_bots error:', err);
+    await ctx.reply('❌ Error loading your bots. Please try /start').catch(() => {});
   }
-
-  buttons.push([Markup.button.callback('⬅️ Back', 'main_menu')]);
-
-  ctx.reply(text, { parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) });
 });
 
 bot.action(/stop_(.+)/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const botId = ctx.match[1];
-  const bot = getBots().bots[botId];
+  try {
+    await ctx.answerCbQuery();
+    const botId = ctx.match[1];
+    const bot = getBots().bots[botId];
 
-  if (!bot) return ctx.reply('Bot not found.');
-  if (bot.userId !== ctx.from.id.toString() && !config.adminIds.includes(ctx.from.id.toString())) {
-    return ctx.reply('Not your bot!');
+    if (!bot) return ctx.reply('Bot not found.');
+    if (bot.userId !== ctx.from.id.toString() && !config.adminIds.includes(ctx.from.id.toString())) {
+      return ctx.reply('Not your bot!');
+    }
+
+    stopBot(botId);
+    await ctx.reply(`⏹️ Bot <code>${botId}</code> stopped.`, { parse_mode: 'HTML' });
+  } catch (err) {
+    console.error('stop bot error:', err);
   }
-
-  stopBot(botId);
-  ctx.reply(`⏹️ Bot <code>${botId}</code> stopped.`, { parse_mode: 'HTML' });
 });
 
 bot.action(/logs_(.+)/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const botId = ctx.match[1];
-  const logFile = path.join(LOGS_DIR, `${botId}.log`);
+  try {
+    await ctx.answerCbQuery();
+    const botId = ctx.match[1];
+    const logFile = path.join(LOGS_DIR, `${botId}.log`);
 
-  if (!fs.existsSync(logFile)) {
-    return ctx.reply('No logs found.');
+    if (!fs.existsSync(logFile)) {
+      return ctx.reply('No logs found.');
+    }
+
+    const logs = fs.readFileSync(logFile, 'utf8');
+    const truncated = logs.slice(-4000);
+
+    await ctx.reply(`📝 Last logs for <code>${botId}</code>:\n\n<pre>${truncated}</pre>`, { parse_mode: 'HTML' });
+  } catch (err) {
+    console.error('logs error:', err);
   }
-
-  const logs = fs.readFileSync(logFile, 'utf8');
-  const truncated = logs.slice(-4000);
-
-  ctx.reply(`📝 Last logs for <code>${botId}</code>:\n\n<pre>${truncated}</pre>`, { parse_mode: 'HTML' });
 });
 
 // ========== REFERRALS ==========
 bot.action('referral_status', async (ctx) => {
-  await ctx.answerCbQuery();
-  const userId = ctx.from.id.toString();
-  const user = getUser(userId);
+  try {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id.toString();
+    const user = getUser(userId);
 
-  if (!user) return ctx.reply('User not found. Use /start first.');
+    if (!user) return ctx.reply('User not found. Use /start first.');
 
-  const refDB = getReferrals();
-  const referredList = refDB.referrals[userId] || [];
+    const refDB = getReferrals();
+    const referredList = refDB.referrals[userId] || [];
 
-  let text = `📊 Your Referral Status\n\n`;
-  text += `🔗 Link: ${getReferralLink(userId)}\n`;
-  text += `📈 Progress: ${user.referralCount}/${config.requiredReferrals}\n`;
-  text += `🔓 Status: ${hasEnoughReferrals(userId) ? '✅ Unlocked' : '🔒 Locked'}\n\n`;
+    let text = `📊 Your Referral Status\n\n`;
+    text += `🔗 Link: ${getReferralLink(userId)}\n`;
+    text += `📈 Progress: ${user.referralCount}/${config.requiredReferrals}\n`;
+    text += `🔓 Status: ${hasEnoughReferrals(userId) ? '✅ Unlocked' : '🔒 Locked'}\n\n`;
 
-  if (referredList.length > 0) {
-    text += `👥 Referred Users (${referredList.length}):\n`;
-    referredList.forEach((id, i) => {
-      text += `${i+1}. <code>${id}</code>\n`;
-    });
-  }
+    if (referredList.length > 0) {
+      text += `👥 Referred Users (${referredList.length}):\n`;
+      referredList.forEach((id, i) => {
+        text += `${i+1}. <code>${id}</code>\n`;
+      });
+    }
 
-  ctx.reply(text, {
-    parse_mode: 'HTML',
-    ...Markup.inlineKeyboard([
+    await safeReply(ctx, text, Markup.inlineKeyboard([
       [Markup.button.callback('📋 Copy Link', 'copy_ref_link')],
       [Markup.button.callback('⬅️ Back', 'main_menu')]
-    ])
-  });
+    ]));
+  } catch (err) {
+    console.error('referral_status error:', err);
+  }
 });
 
 bot.action('copy_ref_link', async (ctx) => {
-  const link = getReferralLink(ctx.from.id);
-  await ctx.answerCbQuery(link, { show_alert: true });
+  try {
+    const link = getReferralLink(ctx.from.id);
+    await ctx.answerCbQuery(link, { show_alert: true });
+  } catch (err) {
+    console.error('copy_ref_link error:', err);
+  }
 });
 
 // ========== PREMIUM ==========
 bot.action('premium_menu', async (ctx) => {
-  await ctx.answerCbQuery();
-  ctx.reply(
-    `⭐ Premium Plans\n\n` +
-    `🆓 Free: 1 bot slot\n` +
-    `⭐ Premium: 5 bot slots\n` +
-    `👑 VIP: Unlimited bots\n\n` +
-    `💰 Pricing:\n` +
-    `• 5 slots - 500 Stars\n` +
-    `• 10 slots - 900 Stars\n` +
-    `• Unlimited - 1500 Stars\n\n` +
-    `💬 Contact: @${config.ownerUsername}`,
-    premiumMenuKeyboard()
-  );
+  try {
+    await ctx.answerCbQuery();
+    await safeReply(ctx,
+      `⭐ Premium Plans\n\n` +
+      `🆓 Free: 1 bot slot\n` +
+      `⭐ Premium: 5 bot slots\n` +
+      `👑 VIP: Unlimited bots\n\n` +
+      `💰 Pricing:\n` +
+      `• 5 slots - 500 Stars\n` +
+      `• 10 slots - 900 Stars\n` +
+      `• Unlimited - 1500 Stars\n\n` +
+      `💬 Contact: @${config.ownerUsername}`,
+      premiumMenuKeyboard()
+    );
+  } catch (err) {
+    console.error('premium_menu error:', err);
+  }
 });
 
 bot.action('buy_premium_stars', async (ctx) => {
-  await ctx.answerCbQuery();
-  ctx.reply(
-    `⭐ Premium via Telegram Stars\n\n` +
-    `Choose your plan:\n\n` +
-    `🥉 5 Slots - 500 Stars\n` +
-    `🥈 10 Slots - 900 Stars\n` +
-    `🥇 Unlimited - 1500 Stars\n\n` +
-    `Click below to pay:`,
-    Markup.inlineKeyboard([
-      [Markup.button.callback('🥉 5 Slots (500)', 'stars_5_500')],
-      [Markup.button.callback('🥈 10 Slots (900)', 'stars_10_900')],
-      [Markup.button.callback('🥇 Unlimited (1500)', 'stars_unli_1500')],
-      [Markup.button.callback('⬅️ Back', 'premium_menu')]
-    ])
-  );
+  try {
+    await ctx.answerCbQuery();
+    await safeReply(ctx,
+      `⭐ Premium via Telegram Stars\n\n` +
+      `Choose your plan:\n\n` +
+      `🥉 5 Slots - 500 Stars\n` +
+      `🥈 10 Slots - 900 Stars\n` +
+      `🥇 Unlimited - 1500 Stars\n\n` +
+      `Click below to pay:`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('🥉 5 Slots (500)', 'stars_5_500')],
+        [Markup.button.callback('🥈 10 Slots (900)', 'stars_10_900')],
+        [Markup.button.callback('🥇 Unlimited (1500)', 'stars_unli_1500')],
+        [Markup.button.callback('⬅️ Back', 'premium_menu')]
+      ])
+    );
+  } catch (err) {
+    console.error('buy_premium_stars error:', err);
+  }
 });
 
 bot.action('buy_premium_manual', async (ctx) => {
-  await ctx.answerCbQuery();
-  ctx.reply(
-    `💬 Manual Payment\n\n` +
-    `Contact @${config.ownerUsername} directly.\n\n` +
-    `Send your User ID: <code>${ctx.from.id}</code>\n` +
-    `And mention how many slots you want.`,
-    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'premium_menu')]]) }
-  );
+  try {
+    await ctx.answerCbQuery();
+    await safeReply(ctx,
+      `💬 Manual Payment\n\n` +
+      `Contact @${config.ownerUsername} directly.\n\n` +
+      `Send your User ID: <code>${ctx.from.id}</code>\n` +
+      `And mention how many slots you want.`,
+      Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'premium_menu')]])
+    );
+  } catch (err) {
+    console.error('buy_premium_manual error:', err);
+  }
 });
 
 bot.command('addpremium', async (ctx) => {
-  const userId = ctx.from.id.toString();
-  if (!config.adminIds.includes(userId)) return ctx.reply('Admin only.');
-
-  const args = ctx.message.text.split(' ');
-  const targetId = args[1];
-  const slots = parseInt(args[2]) || 5;
-  const days = parseInt(args[3]) || 30;
-
-  if (!targetId) return ctx.reply('Usage: /addpremium <userId> [slots] [days]');
-
-  addPremium(targetId, slots, days);
-  ctx.reply(`✅ Premium added for <code>${targetId}</code>\nSlots: ${slots}\nDays: ${days}`, { parse_mode: 'HTML' });
-
   try {
-    await ctx.telegram.sendMessage(targetId,
-      `⭐ Premium Activated!\n\nSlots: ${slots}\nExpires: ${new Date(Date.now() + days*86400000).toLocaleDateString()}\n\nUse /host to deploy more bots.`
-    );
-  } catch (e) {}
+    const userId = ctx.from.id.toString();
+    if (!config.adminIds.includes(userId)) return ctx.reply('Admin only.');
+
+    const args = ctx.message.text.split(' ');
+    const targetId = args[1];
+    const slots = parseInt(args[2]) || 5;
+    const days = parseInt(args[3]) || 30;
+
+    if (!targetId) return ctx.reply('Usage: /addpremium <userId> [slots] [days]');
+
+    addPremium(targetId, slots, days);
+    await ctx.reply(`✅ Premium added for <code>${targetId}</code>\nSlots: ${slots}\nDays: ${days}`, { parse_mode: 'HTML' });
+
+    try {
+      await ctx.telegram.sendMessage(targetId,
+        `⭐ Premium Activated!\n\nSlots: ${slots}\nExpires: ${new Date(Date.now() + days*86400000).toLocaleDateString()}\n\nUse /host to deploy more bots.`
+      );
+    } catch (e) {}
+  } catch (err) {
+    console.error('addpremium error:', err);
+  }
 });
 
 // ========== ADMIN PANEL ==========
 bot.action('admin_panel', async (ctx) => {
-  await ctx.answerCbQuery();
-  const userId = ctx.from.id.toString();
-  if (!config.adminIds.includes(userId)) return ctx.answerCbQuery('Admin only!', { show_alert: true });
+  try {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id.toString();
+    if (!config.adminIds.includes(userId)) return ctx.answerCbQuery('Admin only!', { show_alert: true });
 
-  ctx.reply('🔧 Admin Panel', adminMenuKeyboard());
+    await safeReply(ctx, '🔧 Admin Panel', adminMenuKeyboard());
+  } catch (err) {
+    console.error('admin_panel error:', err);
+  }
 });
 
 bot.action('admin_bots', async (ctx) => {
-  await ctx.answerCbQuery();
-  const db = getBots();
-  const bots = Object.values(db.bots);
+  try {
+    await ctx.answerCbQuery();
+    const db = getBots();
+    const bots = Object.values(db.bots);
 
-  let text = `📊 All Hosted Bots (${bots.length})\n\n`;
-  bots.forEach(b => {
-    text += `<code>${b.id}</code> | ${b.filename} | Port ${b.port} | ${b.status}\n`;
-  });
+    let text = `📊 All Hosted Bots (${bots.length})\n\n`;
+    bots.forEach(b => {
+      text += `<code>${b.id}</code> | ${b.filename} | Port ${b.port} | ${b.status}\n`;
+    });
 
-  ctx.reply(text || 'No bots hosted.', { parse_mode: 'HTML', ...adminMenuKeyboard() });
+    await safeReply(ctx, text || 'No bots hosted.', adminMenuKeyboard());
+  } catch (err) {
+    console.error('admin_bots error:', err);
+  }
 });
 
 bot.action('admin_users', async (ctx) => {
-  await ctx.answerCbQuery();
-  const db = getUsers();
-  const users = Object.values(db.users);
+  try {
+    await ctx.answerCbQuery();
+    const db = getUsers();
+    const users = Object.values(db.users);
 
-  let text = `👥 All Users (${users.length})\n\n`;
-  users.slice(0, 50).forEach(u => {
-    text += `<code>${u.id}</code> | ${u.firstName} | Refs: ${u.referralCount} | Bots: ${u.botsHosted}\n`;
-  });
+    let text = `👥 All Users (${users.length})\n\n`;
+    users.slice(0, 50).forEach(u => {
+      text += `<code>${u.id}</code> | ${u.firstName} | Refs: ${u.referralCount} | Bots: ${u.botsHosted}\n`;
+    });
 
-  ctx.reply(text || 'No users.', { parse_mode: 'HTML', ...adminMenuKeyboard() });
+    await safeReply(ctx, text || 'No users.', adminMenuKeyboard());
+  } catch (err) {
+    console.error('admin_users error:', err);
+  }
 });
 
 bot.action('admin_add_premium', async (ctx) => {
-  await ctx.answerCbQuery();
-  ctx.reply(
-    'Use command:\n/addpremium <userId> <slots> <days>',
-    adminMenuKeyboard()
-  );
+  try {
+    await ctx.answerCbQuery();
+    await safeReply(ctx, 'Use command:\n/addpremium <userId> <slots> <days>', adminMenuKeyboard());
+  } catch (err) {
+    console.error('admin_add_premium error:', err);
+  }
 });
 
 bot.action('admin_stop_bot', async (ctx) => {
-  await ctx.answerCbQuery();
-  ctx.reply(
-    'Reply with bot ID to stop:\n/stopbot <botId>',
-    adminMenuKeyboard()
-  );
+  try {
+    await ctx.answerCbQuery();
+    await safeReply(ctx, 'Reply with bot ID to stop:\n/stopbot <botId>', adminMenuKeyboard());
+  } catch (err) {
+    console.error('admin_stop_bot error:', err);
+  }
 });
 
 bot.command('stopbot', async (ctx) => {
-  if (!config.adminIds.includes(ctx.from.id.toString())) return;
-  const botId = ctx.message.text.split(' ')[1];
-  if (!botId) return ctx.reply('Usage: /stopbot <botId>');
+  try {
+    if (!config.adminIds.includes(ctx.from.id.toString())) return;
+    const botId = ctx.message.text.split(' ')[1];
+    if (!botId) return ctx.reply('Usage: /stopbot <botId>');
 
-  stopBot(botId);
-  ctx.reply(`⏹️ Bot <code>${botId}</code> stopped.`, { parse_mode: 'HTML' });
+    stopBot(botId);
+    await ctx.reply(`⏹️ Bot <code>${botId}</code> stopped.`, { parse_mode: 'HTML' });
+  } catch (err) {
+    console.error('stopbot error:', err);
+  }
 });
 
 bot.action('admin_broadcast', async (ctx) => {
-  await ctx.answerCbQuery();
-  ctx.reply(
-    'Reply with message to broadcast:\n/broadcast <message>',
-    adminMenuKeyboard()
-  );
+  try {
+    await ctx.answerCbQuery();
+    await safeReply(ctx, 'Reply with message to broadcast:\n/broadcast <message>', adminMenuKeyboard());
+  } catch (err) {
+    console.error('admin_broadcast error:', err);
+  }
 });
 
 bot.command('broadcast', async (ctx) => {
-  if (!config.adminIds.includes(ctx.from.id.toString())) return;
-  const msg = ctx.message.text.split(' ').slice(1).join(' ');
-  if (!msg) return ctx.reply('Usage: /broadcast <message>');
+  try {
+    if (!config.adminIds.includes(ctx.from.id.toString())) return;
+    const msg = ctx.message.text.split(' ').slice(1).join(' ');
+    if (!msg) return ctx.reply('Usage: /broadcast <message>');
 
-  const db = getUsers();
-  let sent = 0, failed = 0;
+    const db = getUsers();
+    let sent = 0, failed = 0;
 
-  for (const user of Object.values(db.users)) {
-    try {
-      await ctx.telegram.sendMessage(user.id, `📢 Broadcast:\n\n${msg}`);
-      sent++;
-    } catch (e) { failed++; }
+    for (const user of Object.values(db.users)) {
+      try {
+        await ctx.telegram.sendMessage(user.id, `📢 Broadcast:\n\n${msg}`);
+        sent++;
+      } catch (e) { failed++; }
+    }
+
+    await ctx.reply(`Broadcast sent! ✅ Success: ${sent}, ❌ Failed: ${failed}`);
+  } catch (err) {
+    console.error('broadcast error:', err);
   }
-
-  ctx.reply(`Broadcast sent! ✅ Success: ${sent}, ❌ Failed: ${failed}`);
 });
 
 // ========== RESTART / DELETE / STATS ==========
 bot.action(/restart_(.+)/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const botId = ctx.match[1];
-  const bot = getBots().bots[botId];
+  try {
+    await ctx.answerCbQuery();
+    const botId = ctx.match[1];
+    const bot = getBots().bots[botId];
 
-  if (!bot) return ctx.reply('Bot not found.');
-  if (bot.userId !== ctx.from.id.toString() && !config.adminIds.includes(ctx.from.id.toString())) {
-    return ctx.reply('Not your bot!');
+    if (!bot) return ctx.reply('Bot not found.');
+    if (bot.userId !== ctx.from.id.toString() && !config.adminIds.includes(ctx.from.id.toString())) {
+      return ctx.reply('Not your bot!');
+    }
+
+    const botDir = path.join(BOTS_DIR, botId);
+    const botFile = path.join(botDir, bot.filename);
+    const logFile = path.join(LOGS_DIR, `${botId}.log`);
+    const runtime = detectRuntime(bot.filename);
+
+    try { fs.writeFileSync(logFile, ''); } catch (e) {}
+
+    const out = fs.openSync(logFile, 'a');
+    const err_fd = fs.openSync(logFile, 'a');
+    const newProcess = spawn(runtime.cmd, [botFile], {
+      cwd: botDir,
+      detached: true,
+      stdio: ['ignore', out, err_fd],
+      env: { ...process.env, PORT: bot.port }
+    });
+    newProcess.unref();
+
+    bot.pid = newProcess.pid;
+    bot.status = 'running';
+    bot.restartedAt = Date.now();
+    saveBots(getBots());
+
+    await ctx.reply(`▶️ Bot <code>${botId}</code> restarted!`, { parse_mode: 'HTML' });
+  } catch (err) {
+    console.error('restart error:', err);
   }
-
-  const botDir = path.join(BOTS_DIR, botId);
-  const botFile = path.join(botDir, bot.filename);
-  const logFile = path.join(LOGS_DIR, `${botId}.log`);
-  const runtime = detectRuntime(bot.filename);
-
-  try { fs.writeFileSync(logFile, ''); } catch (e) {}
-
-  const out = fs.openSync(logFile, 'a');
-  const err = fs.openSync(logFile, 'a');
-  const newProcess = spawn(runtime.cmd, [botFile], {
-    cwd: botDir,
-    detached: true,
-    stdio: ['ignore', out, err],
-    env: { ...process.env, PORT: bot.port }
-  });
-  newProcess.unref();
-
-  bot.pid = newProcess.pid;
-  bot.status = 'running';
-  bot.restartedAt = Date.now();
-  saveBots(getBots());
-
-  ctx.reply(`▶️ Bot <code>${botId}</code> restarted!`, { parse_mode: 'HTML' });
 });
 
 bot.action(/delete_(.+)/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const botId = ctx.match[1];
-  const bot = getBots().bots[botId];
+  try {
+    await ctx.answerCbQuery();
+    const botId = ctx.match[1];
+    const bot = getBots().bots[botId];
 
-  if (!bot) return ctx.reply('Bot not found.');
-  if (bot.userId !== ctx.from.id.toString() && !config.adminIds.includes(ctx.from.id.toString())) {
-    return ctx.reply('Not your bot!');
+    if (!bot) return ctx.reply('Bot not found.');
+    if (bot.userId !== ctx.from.id.toString() && !config.adminIds.includes(ctx.from.id.toString())) {
+      return ctx.reply('Not your bot!');
+    }
+
+    deleteBot(botId);
+    await ctx.reply(`🗑️ Bot <code>${botId}</code> deleted permanently.`, { parse_mode: 'HTML' });
+  } catch (err) {
+    console.error('delete error:', err);
   }
-
-  deleteBot(botId);
-  ctx.reply(`🗑️ Bot <code>${botId}</code> deleted permanently.`, { parse_mode: 'HTML' });
 });
 
 bot.action(/botstats_(.+)/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const botId = ctx.match[1];
-  const stats = getBotStats(botId);
+  try {
+    await ctx.answerCbQuery();
+    const botId = ctx.match[1];
+    const stats = getBotStats(botId);
 
-  if (!stats) return ctx.reply('Bot not found.');
+    if (!stats) return ctx.reply('Bot not found.');
 
-  const sysStats = getSystemStats();
+    const sysStats = getSystemStats();
 
-  let text = `📊 BOT STATISTICS\n`;
-  text += `┌────────────────────────────────┐\n`;
-  text += `│ Bot: <b>${stats.filename}</b>\n`;
-  text += `│ 🆔 ID: <code>${stats.id}</code>\n`;
-  text += `│ 🔌 Port: ${stats.port}\n`;
-  text += `│ ⚙️ Runtime: ${stats.runtime}\n`;
-  text += `│ 📊 Status: <b>${stats.status.toUpperCase()}</b>\n`;
-  text += `├────────────────────────────────┤\n`;
+    let text = `📊 BOT STATISTICS\n`;
+    text += `┌────────────────────────────────┐\n`;
+    text += `│ Bot: <b>${stats.filename}</b>\n`;
+    text += `│ 🆔 ID: <code>${stats.id}</code>\n`;
+    text += `│ 🔌 Port: ${stats.port}\n`;
+    text += `│ ⚙️ Runtime: ${stats.runtime}\n`;
+    text += `│ 📊 Status: <b>${stats.status.toUpperCase()}</b>\n`;
+    text += `├────────────────────────────────┤\n`;
 
-  if (stats.processStats) {
-    text += `│ 💻 Process CPU: ${stats.processStats.cpu}\n`;
-    text += `│ 🧠 Process RAM: ${stats.processStats.memory}\n`;
-    text += `│ ⏱️ Process Uptime: ${stats.processStats.uptime}\n`;
-  } else {
-    text += `│ Process: Not running\n`;
+    if (stats.processStats) {
+      text += `│ 💻 Process CPU: ${stats.processStats.cpu}\n`;
+      text += `│ 🧠 Process RAM: ${stats.processStats.memory}\n`;
+      text += `│ ⏱️ Process Uptime: ${stats.processStats.uptime}\n`;
+    } else {
+      text += `│ Process: Not running\n`;
+    }
+
+    text += `├────────────────────────────────┤\n`;
+    text += `│ 📦 Directory Size: ${stats.dirSize}\n`;
+    text += `│ 📝 Log Size: ${stats.logSize}\n`;
+    text += `│ 📅 Deployed: ${new Date(stats.deployedAt).toLocaleString()}\n`;
+
+    if (stats.restartedAt) {
+      text += `│ 🔄 Last Restart: ${new Date(stats.restartedAt).toLocaleString()}\n`;
+    }
+
+    text += `├────────────────────────────────┤\n`;
+    text += `│ 🖥️ Server CPU: ${sysStats.cpuPercent}%\n`;
+    text += `│ 🧠 Server RAM: ${sysStats.memPercent}%\n`;
+    text += `│ 💾 Server Disk: ${sysStats.diskPercent}%\n`;
+    text += `│ 🤖 Total Bots: ${sysStats.runningBots}/${sysStats.maxBots}\n`;
+    text += `└────────────────────────────────┘\n`;
+
+    if (stats.lastError) {
+      text += `\n⚠️ <b>Recent Errors:</b>\n<pre>${stats.lastError}</pre>`;
+    }
+
+    await safeReply(ctx, text, Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'my_bots')]]));
+  } catch (err) {
+    console.error('botstats error:', err);
   }
-
-  text += `├────────────────────────────────┤\n`;
-  text += `│ 📦 Directory Size: ${stats.dirSize}\n`;
-  text += `│ 📝 Log Size: ${stats.logSize}\n`;
-  text += `│ 📅 Deployed: ${new Date(stats.deployedAt).toLocaleString()}\n`;
-
-  if (stats.restartedAt) {
-    text += `│ 🔄 Last Restart: ${new Date(stats.restartedAt).toLocaleString()}\n`;
-  }
-
-  text += `├────────────────────────────────┤\n`;
-  text += `│ 🖥️ Server CPU: ${sysStats.cpuPercent}%\n`;
-  text += `│ 🧠 Server RAM: ${sysStats.memPercent}%\n`;
-  text += `│ 💾 Server Disk: ${sysStats.diskPercent}%\n`;
-  text += `│ 🤖 Total Bots: ${sysStats.runningBots}/${sysStats.maxBots}\n`;
-  text += `└────────────────────────────────┘\n`;
-
-  if (stats.lastError) {
-    text += `\n⚠️ <b>Recent Errors:</b>\n<pre>${stats.lastError}</pre>`;
-  }
-
-  ctx.reply(text, {
-    parse_mode: 'HTML',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'my_bots')]])
-  });
 });
 
 bot.command('server', async (ctx) => {
-  const stats = getSystemStats();
+  try {
+    const stats = getSystemStats();
 
-  let text = `🖥️ SERVER STATUS\n\n`;
-  text += `Platform: ${stats.platform}\n`;
-  text += `Hostname: ${stats.hostname}\n`;
-  text += `Uptime: ${stats.uptime}\n\n`;
+    let text = `🖥️ SERVER STATUS\n\n`;
+    text += `Platform: ${stats.platform}\n`;
+    text += `Hostname: ${stats.hostname}\n`;
+    text += `Uptime: ${stats.uptime}\n\n`;
 
-  text += `💻 CPU (${stats.cpuCount} cores)\n`;
-  text += `${progressBar(stats.cpuPercent)} ${stats.cpuPercent}%\n\n`;
+    text += `💻 CPU (${stats.cpuCount} cores)\n`;
+    text += `${progressBar(stats.cpuPercent)} ${stats.cpuPercent}%\n\n`;
 
-  text += `🧠 RAM\n`;
-  text += `${progressBar(stats.memPercent)} ${stats.memPercent}%\n`;
-  text += `${stats.memUsed} / ${stats.memTotal}\n\n`;
+    text += `🧠 RAM\n`;
+    text += `${progressBar(stats.memPercent)} ${stats.memPercent}%\n`;
+    text += `${stats.memUsed} / ${stats.memTotal}\n\n`;
 
-  text += `💾 Disk\n`;
-  text += `${progressBar(stats.diskPercent)} ${stats.diskPercent}%\n`;
-  text += `${stats.diskUsed} / ${stats.diskTotal}\n\n`;
+    text += `💾 Disk\n`;
+    text += `${progressBar(stats.diskPercent)} ${stats.diskPercent}%\n`;
+    text += `${stats.diskUsed} / ${stats.diskTotal}\n\n`;
 
-  text += `🤖 Hosted Bots: ${stats.totalBots} (${stats.runningBots} running / ${stats.maxBots} max)`;
+    text += `🤖 Hosted Bots: ${stats.totalBots} (${stats.runningBots} running / ${stats.maxBots} max)`;
 
-  ctx.reply(text, { parse_mode: 'HTML' });
+    await ctx.reply(text, { parse_mode: 'HTML' });
+  } catch (err) {
+    console.error('server error:', err);
+  }
 });
 
 // ========== HELP ==========
 bot.action('help_menu', async (ctx) => {
-  await ctx.answerCbQuery();
-  ctx.reply(
-    `❓ How to Use\n\n` +
-    `1️⃣ Get ${config.requiredReferrals} referrals or buy premium\n` +
-    `2️⃣ Use /host to upload your bot file\n` +
-    `3️⃣ Set environment variables if needed\n` +
-    `4️⃣ Bot deploys automatically\n` +
-    `5️⃣ Use /mybots to manage\n\n` +
-    `⚠️ Bots auto-stop after 2 hours idle to save resources.\n\n` +
-    `Supported: Node.js, Python, Bash, Ruby, PHP, Go\n\n` +
-    `Commands:\n` +
-    `/start - Main menu\n` +
-    `/host - Deploy bot\n` +
-    `/mybots - Your bots\n` +
-    `/referral - Referral status\n` +
-    `/premium - Premium plans\n` +
-    `/server - Server stats\n` +
-    `/help - This menu`,
-    Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'main_menu')]])
-  );
+  try {
+    await ctx.answerCbQuery();
+    await safeReply(ctx,
+      `❓ How to Use\n\n` +
+      `1️⃣ Get ${config.requiredReferrals} referrals or buy premium\n` +
+      `2️⃣ Use /host to upload your bot file\n` +
+      `3️⃣ Set environment variables if needed\n` +
+      `4️⃣ Bot deploys automatically\n` +
+      `5️⃣ Use /mybots to manage\n\n` +
+      `⚠️ Bots auto-stop after 2 hours idle to save resources.\n\n` +
+      `Supported: Node.js, Python, Bash, Ruby, PHP, Go\n\n` +
+      `Commands:\n` +
+      `/start - Main menu\n` +
+      `/host - Deploy bot\n` +
+      `/mybots - Your bots\n` +
+      `/referral - Referral status\n` +
+      `/premium - Premium plans\n` +
+      `/server - Server stats\n` +
+      `/help - This menu`,
+      Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'main_menu')]])
+    );
+  } catch (err) {
+    console.error('help_menu error:', err);
+  }
 });
 
 bot.action('main_menu', async (ctx) => {
-  await ctx.answerCbQuery();
-  const user = getUser(ctx.from.id.toString());
-
-  const caption = `🏠 Welcome back, ${ctx.from.first_name}!\n\nUse the buttons below.`;
-
-  // FIXED: Use reply instead of editMessageText to avoid photo/text mismatch
   try {
-    if (fs.existsSync(config.welcomeImage)) {
-      await ctx.replyWithPhoto({ source: config.welcomeImage }, {
-        caption: caption,
-        parse_mode: 'HTML',
-        ...mainMenuKeyboard(user)
-      });
-    } else {
+    await ctx.answerCbQuery();
+    const user = getUser(ctx.from.id.toString());
+
+    const caption = `🏠 Welcome back, ${ctx.from.first_name}!\n\nUse the buttons below.`;
+
+    // Always send as NEW message, never try to edit
+    try {
+      if (fs.existsSync(config.welcomeImage)) {
+        await ctx.replyWithPhoto({ source: config.welcomeImage }, {
+          caption: caption,
+          parse_mode: 'HTML',
+          ...mainMenuKeyboard(user)
+        });
+      } else {
+        await ctx.reply(caption, {
+          parse_mode: 'HTML',
+          ...mainMenuKeyboard(user)
+        });
+      }
+    } catch (err) {
+      console.error('main_menu error:', err);
       await ctx.reply(caption, {
         parse_mode: 'HTML',
         ...mainMenuKeyboard(user)
-      });
+      }).catch(() => {});
     }
   } catch (err) {
-    console.error('Main menu error:', err);
-    await ctx.reply(caption, {
-      parse_mode: 'HTML',
-      ...mainMenuKeyboard(user)
-    });
+    console.error('main_menu outer error:', err);
   }
 });
 
