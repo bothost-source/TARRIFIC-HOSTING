@@ -1,31 +1,12 @@
 {
-  "name": "tarrific-hosting-bot",
-  "version": "2.0.0",
-  "description": "Telegram Bot Hosting Bot with Referral System - Railway Ready",
-  "main": "index.js",
+  "name": "cloud-bridge",
+  "version": "1.0.0",
+  "main": "cloud-bridge.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node cloud-bridge.js"
   },
   "dependencies": {
-    "telegraf": "^4.16.3",
-    "node-telegram-bot-api": "^0.66.0",
-    "express": "^4.19.2",
-    "pm2": "^5.4.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
-  },
-  "keywords": [
-    "telegram",
-    "bot",
-    "hosting",
-    "deploy",
-    "referral"
-  ],
-  "author": "TARRIFIC",
-  "license": "MIT",
-  "engines": {
-    "node": ">=18.0.0"
+    "telegraf": "^4.15.0",
+    "express": "^4.18.2"
   }
 }
